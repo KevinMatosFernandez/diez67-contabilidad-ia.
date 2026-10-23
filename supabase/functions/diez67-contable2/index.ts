@@ -329,25 +329,29 @@ const month = MONTHS[m[3]];
 const year = Number(m[4]);
 
 const valid = (day: number) => {
-const d = new Date(Date.UTC(year, Number(month) - 1, day));
-return d.getUTCFullYear() === year &&
-d.getUTCMonth() === Number(month) - 1 &&
-d.getUTCDate() === day;
+  const d = new Date(Date.UTC(year, Number(month) - 1, day));
+  return d.getUTCFullYear() === year &&
+    d.getUTCMonth() === Number(month) - 1 &&
+    d.getUTCDate() === day;
 };
 
 if (!valid(d1) || !valid(d2) || d2 < d1) return null;
 
 return {
-start: ${year}-${month}-${String(d1).padStart(2, "0")},
-end: ${year}-${month}-${String(d2).padStart(2, "0")},
+  start: `${year}-${month}-${String(d1).padStart(2, "0")}`,
+  end: `${year}-${month}-${String(d2).padStart(2, "0")}`,
 };
 }
 
 function originalCells(headers: unknown[], row: unknown[]) {
-return headers.map((h, i) => ({
-columna: XLSX.utils.encode_col(i),
-encabezado: String(h ?? "").trim() || (sin encabezado ${XLSX.utils.encode_col(i)}),
-valor: row[i] === undefined ? null : row[i],
+  return headers.map((h, i) => ({
+    columna: XLSX.utils.encode_col(i),
+    encabezado: String(h ?? "").trim() ||
+      `(sin encabezado ${XLSX.utils.encode_col(i)})`,
+    valor: row[i] === undefined ? null : row[i],
+  }));
+}
+
 })).filter((c) => c.valor !== null && c.valor !== "" && c.encabezado !== "");
 }
 
