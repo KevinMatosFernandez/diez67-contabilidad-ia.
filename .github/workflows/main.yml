@@ -7,7 +7,6 @@ on:
 jobs:
   probar:
     runs-on: ubuntu-latest
-
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
@@ -25,11 +24,8 @@ jobs:
 
   desplegar:
     runs-on: ubuntu-latest
-
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      PROJECT_ID: pyxjppzlfgmxivcfwkgv
-
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
@@ -39,5 +35,5 @@ jobs:
         with:
           version: latest
 
-      - name: Desplegar diez67-contable2
-        run: supabase functions deploy diez67-contable2 --project-ref "$PROJECT_ID"
+      - name: Desplegar función contable
+        run: supabase functions deploy diez67-contable2 --project-ref pyxjppzlfgmxivcfwkgv
