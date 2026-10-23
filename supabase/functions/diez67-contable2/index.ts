@@ -202,20 +202,28 @@ return String(value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
 // Lector numérico tolerante: SOLO para celdas del Excel y datos ya guardados.
 function parseNumber(value: unknown): number | null {
 if (value === null || value === undefined || value === "") return null;
-if (typeof value === "number") return Number.isFinite(value) ? value : null;
 
-let s = String(value).trim().replace(/\s/g, "").replace(/[%$€₱]/g, "");
+if (value === null || value === undefined || value === "") return null;
+if (typeof value === "number") {
+  return Number.isFinite(value) ? value : null;
+}
+
+let s = String(value)
+  .trim()
+  .replace(/\s/g, "")
+  .replace(/[%$€₱]/g, "");
+
 if (!s || s === "-" || s.toLowerCase() === "n/a") return null;
 
 if (s.includes(",") && s.includes(".")) {
-s = s.lastIndexOf(",") > s.lastIndexOf(".")
-? s.replace(/./g, "").replace(",", ".")
-: s.replace(/,/g, "");
+  s = s.lastIndexOf(",") > s.lastIndexOf(".")
+    ? s.replace(/\./g, "").replace(",", ".")
+    : s.replace(/,/g, "");
 } else if (s.includes(",")) {
-const p = s.split(",");
-s = p.length === 2 && p[1].length !== 3
-? ${p[0]}.${p[1]}
-: s.replace(/,/g, "");
+  const p = s.split(",");
+  s = p.length === 2 && p[1].length !== 3
+    ? `${p[0]}.${p[1]}`
+    : s.replace(/,/g, "");
 }
 
 const n = Number(s);
