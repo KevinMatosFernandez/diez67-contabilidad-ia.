@@ -720,29 +720,59 @@ const missingSalesUSD = countMissing("importe_usd");
 const missingCostCUP = countMissing("importe_costo");
 const missingCostUSD = countMissing("importe_costo_usd");
 
+  const totalInventoryCUP = records.reduce(
+  (total, row) => {
+    const stock = parseNumber(row["final"]);
+    const cost = parseNumber(row["costo"]);
+    return total + (stock !== null && cost !== null ? stock * cost : 0);
+  },
+  0,
+);
+
+const totalInventoryUSD = records.reduce(
+  (total, row) => {
+    const stock = parseNumber(row["final"]);
+    const costUSD = parseNumber(row["costo_usd"]);
+    return total + (stock !== null && costUSD !== null ? stock * costUSD : 0);
+  },
+  0,
+);
+
+const missingInventoryCUP = records.filter(
+  (row) => parseNumber(row["final"]) === null || parseNumber(row["costo"]) === null,
+).length;
+
+const missingInventoryUSD = records.filter(
+  (row) => parseNumber(row["final"]) === null || parseNumber(row["costo_usd"]) === null,
+).length;
 const formatMoney = (value: number): string =>
 value.toLocaleString("es-ES", {
 minimumFractionDigits: 2,
 maximumFractionDigits: 2,
 });
-
+  
 const moneySummary = {
-periodo_consultado: periodLabel,
-cantidad_de_productos: records.length,
-ventas_CUP: totalSalesCUP,
-ventas_USD: totalSalesUSD,
-costo_total_CUP: totalCostCUP,
-costo_total_USD: totalCostUSD,
-ganancias_registradas_CUP: recordedProfitCUP,
-ganancias_registradas_USD: recordedProfitUSD,
-ganancias_recalculadas_CUP: calculatedProfitCUP,
-ganancias_recalculadas_USD: calculatedProfitUSD,
-filas_sin_ventas_CUP: missingSalesCUP,
-filas_sin_ventas_USD: missingSalesUSD,
-filas_sin_costo_total_CUP: missingCostCUP,
-filas_sin_costo_total_USD: missingCostUSD,
-};
+  periodo_consultado: periodLabel,
+  cantidad_de_productos: records.length,
+  ventas_CUP: totalSalesCUP,
+  ventas_USD: totalSalesUSD,
+  costo_total_CUP: totalCostCUP,
+  costo_total_USD: totalCostUSD,
 
+  valor_inventario_final_CUP: totalInventoryCUP,
+  valor_inventario_final_USD: totalInventoryUSD,
+  productos_sin_datos_para_valorar_inventario_CUP: missingInventoryCUP,
+  productos_sin_datos_para_valorar_inventario_USD: missingInventoryUSD,
+
+  ganancias_registradas_CUP: recordedProfitCUP,
+  ganancias_registradas_USD: recordedProfitUSD,
+  ganancias_recalculadas_CUP: calculatedProfitCUP,
+  ganancias_recalculadas_USD: calculatedProfitUSD,
+  filas_sin_ventas_CUP: missingSalesCUP,
+  filas_sin_ventas_USD: missingSalesUSD,
+  filas_sin_costo_total_CUP: missingCostCUP,
+  filas_sin_costo_total_USD: missingCostUSD,
+};  
 const profitQuestion = /\b(ganancia|ganancias|beneficio|rentabilidad|margen)\b/.test(normalizedQuestion);
 const salesQuestion = /\b(venta|ventas|ingreso|ingresos|facturacion)\b/.test(normalizedQuestion);
 const costQuestion = /\b(costo|costos|coste|costes)\b/.test(normalizedQuestion);
