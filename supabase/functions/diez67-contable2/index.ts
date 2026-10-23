@@ -1,7 +1,7 @@
 import * as XLSX from "npm:xlsx@0.18.5";
 
 const TELEGRAM_API = "https://api.telegram.org";
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
+const GEMINI_MODEL = "gemini-3.5-flash-lite";
 const GEMINI_API = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 const MAX_FILE_BYTES = 15 * 1024 * 1024;
 
