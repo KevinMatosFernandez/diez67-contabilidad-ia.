@@ -1558,6 +1558,14 @@ const HELP_TEXT = [
 "/pendientes - lista las operaciones pendientes",
 "/confirmar ID - registra la operación (crea un asiento en borrador)",
 "/cancelar ID - descarta una operación pendiente",
+"",
+"Reportes contables (CUP y USD siempre por separado; indica CUP o USD si quieres solo una):",
+"/saldos [fecha] - balance de comprobación (saldo de cada cuenta)",
+"/resultados [AAAA-MM] - estado de resultados del mes (por defecto, el mes actual)",
+"/balance [fecha] - balance general (activo, pasivo y patrimonio)",
+"/mayor CODIGO [AAAA-MM] - movimientos de una cuenta, por ejemplo /mayor 1101",
+"Los reportes incluyen asientos en borrador y excluyen los anulados.",
+"",
 "/ayuda - muestra esta ayuda",
 "",
 "Operaciones que entiendo (escríbelas con normalidad, una por mensaje, con importe y moneda):",
@@ -1576,6 +1584,332 @@ const HELP_TEXT = [
 "También puedes preguntar por ventas, costos y ganancias, o enviar un Excel .xlsx con el período en el nombre (por ejemplo: Ventas 1 octubre 2026.xlsx).",
 ].join("\n");
 
+/* ========================================================= FASE 1: LIBRO MAYOR Y REPORTES (solo lectura) ========================================================= */
+
+const MONEDAS_ALL: Currency[] = ["CUP", "USD"];
+const REPORT_USAGE =
+  "\nFormato: /comando [CUP|USD] [AAAA-MM o AAAA-MM-DD]. Si no indicas moneda, se muestran CUP y USD por separado.";
+
+type SaldoRow = { cuenta_id: number; codigo: string; nombre: string; tipo: string; debe: number; haber: number };
+
+type ParsedReportArgs = {
+  monedas: Currency[];
+  fechas: { desde: string; hasta: string }[];
+  cuenta: string | null;
+  error: string | null;
+};
+
+const numberFormat = new Intl.NumberFormat("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function fmt(n: number): string {
+  const r = Math.round(n * 100) / 100;
+  return numberFormat.format(r === 0 ? 0 : r);
+}
+
+function fmtSigned(n: number): string {
+  // Saldo con naturaleza: D = deudor, A = acreedor.
+  return `${fmt(Math.abs(n))} ${n >= 0 ? "D" : "A"}`;
+}
+
+function lastDayOfMonth(year: number, month: number): string {
+  const day = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function parseReportArgs(arg: string): ParsedReportArgs {
+  const monedas: Currency[] = [];
+  const fechas: { desde: string; hasta: string }[] = [];
+  let cuenta: string | null = null;
+
+  const fail = (error: string): ParsedReportArgs => ({ monedas, fechas, cuenta, error });
+
+  for (const token of arg.trim().split(/\s+/).filter(Boolean)) {
+    const up = token.toUpperCase();
+    if (up === "CUP" || up === "USD") {
+      if (!monedas.includes(up)) monedas.push(up);
+      continue;
+    }
+
+    const month = token.match(/^(\d{4})-(\d{2})$/);
+    if (month) {
+      const y = Number(month[1]);
+      const m = Number(month[2]);
+      if (m < 1 || m > 12) return fail(`Mes inválido: ${sanitizeLine(token, 20)}.`);
+      fechas.push({ desde: `${month[1]}-${month[2]}-01`, hasta: lastDayOfMonth(y, m) });
+      continue;
+    }
+
+    if (isValidIsoDate(token)) {
+      fechas.push({ desde: token, hasta: token });
+      continue;
+    }
+
+    if (/^\d{4}$/.test(token) && cuenta === null) {
+      cuenta = token;
+      continue;
+    }
+
+    return fail(`No entendí "${sanitizeLine(token, 30)}".`);
+  }
+
+  if (fechas.length > 2) return fail("Indica como máximo dos fechas (desde y hasta).");
+  return { monedas, fechas, cuenta, error: null };
+}
+
+function resolveCutoff(p: ParsedReportArgs, today: string): string {
+  return p.fechas.length ? p.fechas[p.fechas.length - 1].hasta : today;
+}
+
+function resolvePeriod(p: ParsedReportArgs, today: string): { desde: string; hasta: string; error: string | null } {
+  if (!p.fechas.length) {
+    const [y, m] = today.split("-");
+    return { desde: `${y}-${m}-01`, hasta: lastDayOfMonth(Number(y), Number(m)), error: null };
+  }
+  const desde = p.fechas[0].desde;
+  const hasta = p.fechas[p.fechas.length - 1].hasta;
+  if (desde > hasta) return { desde, hasta, error: "La fecha inicial es posterior a la final." };
+  return { desde, hasta, error: null };
+}
+
+async function dbRpc(env: Env, fn: string, body: Record<string, unknown>): Promise<unknown> {
+  const response = await fetch(`${env.projectUrl}/rest/v1/rpc/${fn}`, {
+    method: "POST",
+    headers: supabaseHeaders(env.databaseKey),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    console.error("RPC error", fn, response.status, (await response.text()).slice(0, 500));
+    throw new Error(`RPC ${fn} falló (HTTP ${response.status}).`);
+  }
+  return await response.json();
+}
+
+async function loadSaldos(env: Env, desde: string | null, hasta: string | null, moneda: Currency): Promise<SaldoRow[]> {
+  const data = await dbRpc(env, "saldos_cuentas", { p_desde: desde, p_hasta: hasta, p_moneda: moneda });
+  if (!Array.isArray(data)) throw new Error("saldos_cuentas devolvió un formato inesperado.");
+  return data.map((r: Record<string, unknown>) => ({
+    cuenta_id: Number(r.cuenta_id),
+    codigo: String(r.codigo),
+    nombre: String(r.nombre),
+    tipo: String(r.tipo),
+    debe: Number(r.debe),
+    haber: Number(r.haber),
+  }));
+}
+
+async function loadAsientosNote(env: Env, desde: string | null, hasta: string | null, moneda: Currency): Promise<string> {
+  const r = (await dbRpc(env, "resumen_asientos", { p_desde: desde, p_hasta: hasta, p_moneda: moneda })) as Record<string, unknown>;
+  const borrador = Number(r?.borrador ?? 0);
+  const validado = Number(r?.validado ?? 0);
+  const base = `Asientos incluidos: ${borrador} en borrador y ${validado} validados (los anulados se excluyen).`;
+  return borrador > 0 ? `${base} Los borradores aún no están validados.` : base;
+}
+
+const REPORT_DB_ERROR = "No pude consultar la contabilidad en este momento, así que no puedo verificar las cifras. No se cambió nada.";
+
+/* ----- /comprobacion (balance de comprobación de saldos) ----- */
+
+async function reportTrialBalance(env: Env, arg: string): Promise<string> {
+  const p = parseReportArgs(arg);
+  if (p.error) return p.error + REPORT_USAGE;
+
+  const hasta = resolveCutoff(p, businessDate());
+  const monedas = p.monedas.length ? p.monedas : MONEDAS_ALL;
+  const sections: string[] = [];
+
+  try {
+    for (const moneda of monedas) {
+      const rows = await loadSaldos(env, null, hasta, moneda);
+      if (!rows.length) continue;
+
+      let totDeudor = 0;
+      let totAcreedor = 0;
+      const lines = rows.map((r) => {
+        const saldo = r.debe - r.haber;
+        if (saldo >= 0) totDeudor += saldo; else totAcreedor += -saldo;
+        return `${r.codigo} ${r.nombre}: ${fmtSigned(saldo)}`;
+      });
+
+      const cuadra = Math.abs(totDeudor - totAcreedor) < 0.005;
+      const note = await loadAsientosNote(env, null, hasta, moneda);
+      sections.push([
+        `BALANCE DE COMPROBACIÓN al ${hasta} — ${moneda}`,
+        ...lines,
+        `Total deudor: ${fmt(totDeudor)} | Total acreedor: ${fmt(totAcreedor)}`,
+        cuadra ? "Resultado: cuadra." : `⚠ NO cuadra: diferencia ${fmt(totDeudor - totAcreedor)} ${moneda}. Hay que revisar los asientos.`,
+        note,
+      ].join("\n"));
+    }
+  } catch {
+    return REPORT_DB_ERROR;
+  }
+
+  if (!sections.length) return `No hay asientos registrados hasta el ${hasta}. Esto no significa que no haya habido movimientos: solo que aún no están contabilizados.`;
+  return sections.join("\n\n");
+}
+
+/* ----- /resultados (estado de resultados del período) ----- */
+
+async function reportIncomeStatement(env: Env, arg: string): Promise<string> {
+  const p = parseReportArgs(arg);
+  if (p.error) return p.error + REPORT_USAGE;
+
+  const period = resolvePeriod(p, businessDate());
+  if (period.error) return period.error + REPORT_USAGE;
+
+  const monedas = p.monedas.length ? p.monedas : MONEDAS_ALL;
+  const sections: string[] = [];
+
+  try {
+    for (const moneda of monedas) {
+      const rows = await loadSaldos(env, period.desde, period.hasta, moneda);
+      const pl = rows.filter((r) => r.tipo === "ingreso" || r.tipo === "gasto");
+      if (!pl.length) continue;
+
+      const ventas = pl.filter((r) => r.tipo === "ingreso" && r.codigo.startsWith("41"));
+      const otrosIngresos = pl.filter((r) => r.tipo === "ingreso" && !r.codigo.startsWith("41"));
+      const costo = pl.filter((r) => r.tipo === "gasto" && r.codigo.startsWith("5"));
+      const gastos = pl.filter((r) => r.tipo === "gasto" && !r.codigo.startsWith("5"));
+
+      const ing = (r: SaldoRow) => r.haber - r.debe;
+      const gas = (r: SaldoRow) => r.debe - r.haber;
+      const sum = (list: SaldoRow[], f: (r: SaldoRow) => number) => list.reduce((acc, r) => acc + f(r), 0);
+      const detail = (list: SaldoRow[], f: (r: SaldoRow) => number) =>
+        list.map((r) => `  ${r.codigo} ${r.nombre}: ${fmt(f(r))}`);
+
+      const totVentas = sum(ventas, ing);
+      const totOtros = sum(otrosIngresos, ing);
+      const totCosto = sum(costo, gas);
+      const totGastos = sum(gastos, gas);
+      const bruta = totVentas - totCosto;
+      const resultado = totVentas + totOtros - totCosto - totGastos;
+
+      const out = [`ESTADO DE RESULTADOS ${period.desde} al ${period.hasta} — ${moneda}`];
+      out.push(`Ventas: ${fmt(totVentas)}`, ...detail(ventas, ing));
+      out.push(`Costo de mercancías vendidas: ${fmt(totCosto)}`, ...detail(costo, gas));
+      out.push(`Ganancia bruta: ${fmt(bruta)}`);
+      out.push(totVentas > 0 ? `Margen bruto: ${((bruta / totVentas) * 100).toFixed(1)}%` : "Margen bruto: no se calcula (no hay ventas contabilizadas).");
+      if (otrosIngresos.length) out.push(`Otros ingresos: ${fmt(totOtros)}`, ...detail(otrosIngresos, ing));
+      out.push(`Gastos operativos: ${fmt(totGastos)}`, ...detail(gastos, gas));
+      out.push(`RESULTADO DEL PERÍODO: ${fmt(resultado)} ${moneda}`);
+      out.push(await loadAsientosNote(env, period.desde, period.hasta, moneda));
+      if (totVentas === 0) {
+        out.push("Aviso: no hay ventas en los asientos de este período. Las ventas del Excel aún no están contabilizadas, así que este resultado solo refleja gastos registrados.");
+      }
+      sections.push(out.join("\n"));
+    }
+  } catch {
+    return REPORT_DB_ERROR;
+  }
+
+  if (!sections.length) return `No hay ingresos ni gastos contabilizados del ${period.desde} al ${period.hasta}.`;
+  sections.push("Es un resultado contable, no flujo de caja.");
+  return sections.join("\n\n");
+}
+
+/* ----- /balance (balance general / situación financiera) ----- */
+
+async function reportBalanceSheet(env: Env, arg: string): Promise<string> {
+  const p = parseReportArgs(arg);
+  if (p.error) return p.error + REPORT_USAGE;
+
+  const hasta = resolveCutoff(p, businessDate());
+  const monedas = p.monedas.length ? p.monedas : MONEDAS_ALL;
+  const sections: string[] = [];
+
+  try {
+    for (const moneda of monedas) {
+      const rows = await loadSaldos(env, null, hasta, moneda);
+      if (!rows.length) continue;
+
+      const activos = rows.filter((r) => r.tipo === "activo");
+      const pasivos = rows.filter((r) => r.tipo === "pasivo");
+      const patrimonio = rows.filter((r) => r.tipo === "patrimonio");
+      const deudor = (r: SaldoRow) => r.debe - r.haber;
+      const acreedor = (r: SaldoRow) => r.haber - r.debe;
+      const sum = (list: SaldoRow[], f: (r: SaldoRow) => number) => list.reduce((acc, r) => acc + f(r), 0);
+      const detail = (list: SaldoRow[], f: (r: SaldoRow) => number) =>
+        list.map((r) => `  ${r.codigo} ${r.nombre}: ${fmt(f(r))}${f(r) < -0.005 && r.tipo !== "patrimonio" ? " ⚠ saldo contrario a su naturaleza" : ""}`);
+
+      const resultadoAcum = rows
+        .filter((r) => r.tipo === "ingreso" || r.tipo === "gasto")
+        .reduce((acc, r) => acc + (r.haber - r.debe), 0);
+
+      const totActivo = sum(activos, deudor);
+      const totPasivo = sum(pasivos, acreedor);
+      const totPatrimonio = sum(patrimonio, acreedor) + resultadoAcum;
+      const dif = totActivo - (totPasivo + totPatrimonio);
+
+      const out = [`BALANCE GENERAL al ${hasta} — ${moneda}`];
+      out.push(`ACTIVO: ${fmt(totActivo)}`, ...detail(activos, deudor));
+      out.push(`PASIVO: ${fmt(totPasivo)}`, ...detail(pasivos, acreedor));
+      out.push(`PATRIMONIO: ${fmt(totPatrimonio)}`, ...detail(patrimonio, acreedor));
+      out.push(`  Resultado acumulado (ingresos − gastos): ${fmt(resultadoAcum)}`);
+      out.push(Math.abs(dif) < 0.005 ? "Ecuación contable: Activo = Pasivo + Patrimonio ✔" : `⚠ NO cuadra: Activo − (Pasivo + Patrimonio) = ${fmt(dif)} ${moneda}. Hay que revisar los asientos.`);
+      out.push(await loadAsientosNote(env, null, hasta, moneda));
+      sections.push(out.join("\n"));
+    }
+  } catch {
+    return REPORT_DB_ERROR;
+  }
+
+  if (!sections.length) return `No hay asientos registrados hasta el ${hasta}, por lo que no puedo presentar un balance.`;
+  sections.push("Solo incluye lo contabilizado por asientos; el inventario y las ventas del Excel no están incluidos todavía.");
+  return sections.join("\n\n");
+}
+
+/* ----- /mayor CODIGO (libro mayor de una cuenta) ----- */
+
+async function reportLedger(env: Env, arg: string): Promise<string> {
+  const p = parseReportArgs(arg);
+  if (p.error) return p.error + REPORT_USAGE;
+  if (!p.cuenta) return "Indica el código de la cuenta, por ejemplo: /mayor 1101 (opcional: CUP o USD y un mes AAAA-MM).";
+
+  let account: Record<string, unknown> | undefined;
+  try {
+    const rows = await dbGet(env, "plan_cuentas", { select: "id,codigo,nombre,tipo", codigo: `eq.${p.cuenta}`, limit: "1" });
+    account = rows[0];
+  } catch {
+    return "No pude consultar el plan de cuentas, así que no puedo mostrar el mayor.";
+  }
+  if (!account) return `No existe la cuenta ${p.cuenta} en el plan de cuentas.`;
+
+  const desde = p.fechas.length ? p.fechas[0].desde : null;
+  const hasta = p.fechas.length ? p.fechas[p.fechas.length - 1].hasta : null;
+  if (desde && hasta && desde > hasta) return "La fecha inicial es posterior a la final." + REPORT_USAGE;
+
+  const monedas = p.monedas.length ? p.monedas : MONEDAS_ALL;
+  const MAX_ROWS = 25;
+  const sections: string[] = [];
+
+  try {
+    for (const moneda of monedas) {
+      const data = await dbRpc(env, "mayor_cuenta", { p_cuenta_id: Number(account.id), p_desde: desde, p_hasta: hasta, p_moneda: moneda });
+      if (!Array.isArray(data) || !data.length) continue;
+
+      const shown = data.slice(-MAX_ROWS) as Record<string, unknown>[];
+      const lines = shown.map((r) => {
+        const estado = r.estado === "borrador" ? " (borrador)" : "";
+        return `${String(r.fecha)} #${String(r.asiento_id)}${estado} ${sanitizeLine(r.descripcion, 40)} | D ${fmt(Number(r.debe))} | H ${fmt(Number(r.haber))} | Saldo ${fmtSigned(Number(r.saldo))}`;
+      });
+      const last = data[data.length - 1] as Record<string, unknown>;
+      const rangeText = desde || hasta ? ` (${desde ?? "inicio"} a ${hasta ?? "hoy"})` : "";
+
+      sections.push([
+        `MAYOR ${String(account.codigo)} ${String(account.nombre)} — ${moneda}${rangeText}`,
+        data.length > MAX_ROWS ? `Se muestran los últimos ${MAX_ROWS} de ${data.length} movimientos.` : `${data.length} movimientos.`,
+        ...lines,
+        `Saldo final: ${fmtSigned(Number(last.saldo))} (D = deudor, A = acreedor)`,
+      ].join("\n"));
+    }
+  } catch {
+    return REPORT_DB_ERROR;
+  }
+
+  if (!sections.length) return `No hay movimientos contabilizados en la cuenta ${String(account.codigo)} ${String(account.nombre)} para ese filtro.`;
+  return sections.join("\n\n");
+}
+
 async function handleCommand(env: Env, command: string, arg: string): Promise<string> {
 switch (command) {
 case "start":
@@ -1584,6 +1918,15 @@ case "help":
 return HELP_TEXT;
 case "pendientes":
 return await handlePending(env);
+case "comprobacion":
+case "saldos":
+return await reportTrialBalance(env, arg);
+case "resultados":
+return await reportIncomeStatement(env, arg);
+case "balance":
+return await reportBalanceSheet(env, arg);
+case "mayor":
+return await reportLedger(env, arg);
 case "confirmar":
 return await handleConfirm(env, arg);
 case "cancelar":
