@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - "supabase/functions/**"
-      - ".github/workflows/pruebas.yml"
+      - ".github/workflows/main.yml"
   pull_request:
   workflow_dispatch:
 
